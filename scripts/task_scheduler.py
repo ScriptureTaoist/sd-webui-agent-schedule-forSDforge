@@ -205,10 +205,11 @@ class Script(scripts.Script):
             log.debug(f"[AgentScheduler] Found dependency with raw_inputs: {raw_inputs}")
 
             input_components = get_components_by_ids(root, raw_inputs)
-            # Filter out any non-component objects
-            input_components = [c for c in input_components if isinstance(c, gr.Component)]
 
             log.debug(f"[AgentScheduler] Resolved {len(input_components)} components out of {len(raw_inputs)} raw inputs.")
+
+            if len(input_components) != len(raw_inputs):
+                log.warning(f"[AgentScheduler] Could not resolve all components. Some components may be missing from the task.")
             
             # Prepend the checkpoint dropdown if it exists
             if self.checkpoint_dropdown:

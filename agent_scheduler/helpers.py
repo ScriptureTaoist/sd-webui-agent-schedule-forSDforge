@@ -101,7 +101,7 @@ def get_component_by_elem_id(root: Block, elem_id: str):
     return elem
 
 
-def get_components_by_ids(root: gr.Blocks, ids: List[Any]) -> List[gr.Component]:
+def get_components_by_ids(root: gr.Blocks, ids: List[Any]) -> List[Block]:
     """
     Finds Gradio components in a Blocks root by their ID.
     """
@@ -113,9 +113,9 @@ def get_components_by_ids(root: gr.Blocks, ids: List[Any]) -> List[gr.Component]
         component = None
         if isinstance(cid, int):
             block = root.blocks.get(cid)
-            if isinstance(block, gr.Component):
+            if isinstance(block, Block):
                 component = block
-        elif isinstance(cid, gr.Component):
+        elif isinstance(cid, Block):
             component = cid
         
         if component is not None:
