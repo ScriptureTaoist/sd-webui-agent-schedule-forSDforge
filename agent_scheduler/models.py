@@ -68,12 +68,14 @@ class Txt2ImgApiTaskArgs(StableDiffusionTxt2ImgProcessingAPI):
         description="The callback URL to send the result to.",
     )
 
-    class Config(StableDiffusionTxt2ImgProcessingAPI.__config__):
-        @staticmethod
-        def schema_extra(schema: Dict[str, Any], model) -> None:
-            props = schema.get("properties", {})
-            props.pop("send_images", None)
-            props.pop("save_images", None)
+    model_config = {
+        "json_schema_extra": {
+            "properties": {
+                "send_images": None,
+                "save_images": None,
+            }
+        }
+    }
 
 
 class Img2ImgApiTaskArgs(StableDiffusionImg2ImgProcessingAPI):
@@ -94,12 +96,14 @@ class Img2ImgApiTaskArgs(StableDiffusionImg2ImgProcessingAPI):
         description="The callback URL to send the result to.",
     )
 
-    class Config(StableDiffusionImg2ImgProcessingAPI.__config__):
-        @staticmethod
-        def schema_extra(schema: Dict[str, Any], model) -> None:
-            props = schema.get("properties", {})
-            props.pop("send_images", None)
-            props.pop("save_images", None)
+    model_config = {
+        "json_schema_extra": {
+            "properties": {
+                "send_images": None,
+                "save_images": None,
+            }
+        }
+    }
 
 
 class QueueTaskResponse(BaseModel):

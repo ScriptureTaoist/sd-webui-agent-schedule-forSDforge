@@ -3,11 +3,13 @@ import sys
 import abc
 import atexit
 import time
+import json
 import logging
 import platform
 import requests
+from modules import shared
 import traceback
-from typing import Callable, List, NoReturn
+from typing import Callable, List, NoReturn, Any
 
 import gradio as gr
 from gradio.blocks import Block, BlockContext
@@ -52,6 +54,18 @@ else:
 
     log = logger
 
+translations = {}
+loc_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'localizations', 'zh-CN.json')
+if os.path.exists(loc_file):
+    with open(loc_file, 'r', encoding='utf-8') as f:
+        translations = json.load(f)
+
+def i18n(text):
+    lang = getattr(shared.opts, "agent_scheduler_language", "English")
+    if lang == "中文" and text in translations:
+        return translations[text]
+    return text
+
 
 class Singleton(abc.ABCMeta, type):
     """
@@ -87,16 +101,25 @@ def get_component_by_elem_id(root: Block, elem_id: str):
     return elem
 
 
-def get_components_by_ids(root: Block, ids: List[int]):
-    components: List[Block] = []
+def get_components_by_ids(root: gr.Blocks, ids: List[Any]) -> List[gr.Component]:
+    """
+    Finds Gradio components in a Blocks root by their ID.
+    """
+    components = []
+    if not isinstance(ids, list):
+        return components
 
-    if root._id in ids:
-        components.append(root)
-        ids = [_id for _id in ids if _id != root._id]
-
-    if isinstance(root, BlockContext):
-        for block in root.children:
-            components.extend(get_components_by_ids(block, ids))
+    for cid in ids:
+        component = None
+        if isinstance(cid, int):
+            block = root.blocks.get(cid)
+            if isinstance(block, gr.Component):
+                component = block
+        elif isinstance(cid, gr.Component):
+            component = cid
+        
+        if component is not None:
+            components.append(component)
 
     return components
 
@@ -106,8 +129,8 @@ def detect_control_net(root: gr.Blocks, submit: gr.Button):
 
     dependencies: List[dict] = [
         x
-        for x in root.dependencies
-        if x["trigger"] == "click" and submit._id in x["targets"]
+        for x in root.config['dependencies']
+        if x.get("trigger") == "click" and submit._id in x["targets"]
     ]
     for d in dependencies:
         if len(d["outputs"]) == 1:

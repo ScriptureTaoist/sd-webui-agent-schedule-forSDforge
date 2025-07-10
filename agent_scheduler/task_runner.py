@@ -13,7 +13,7 @@ from typing import Any, Callable, Union, Optional, List, Dict
 from fastapi import FastAPI
 from PIL import Image
 
-from modules import progress, shared, script_callbacks
+from modules import progress, shared, script_callbacks, sd_models
 from modules.call_queue import queue_lock, wrap_gradio_call
 from modules.txt2img import txt2img
 from modules.img2img import img2img
@@ -168,21 +168,28 @@ class TaskRunner:
         Deserialize UI task arguments
         In-place update named_args and script_args
         """
+        is_forge = hasattr(sd_models, "reload_model_weights")
 
         # Apply checkpoint override
         if checkpoint is not None:
-            override: List[str] = named_args.get("override_settings_texts", [])
-            override = [x for x in override if not x.startswith("Model hash: ")]
-            if checkpoint != "System":
-                override.append("Model hash: " + checkpoint)
-            named_args["override_settings_texts"] = override
+            if is_forge:
+                sd_models.reload_model_weights(sd_model=None, info=checkpoint)
+            else:
+                override: List[str] = named_args.get("override_settings_texts", [])
+                override = [x for x in override if not x.startswith("Model hash: ")]
+                if checkpoint != "System":
+                    override.append("Model hash: " + checkpoint)
+                named_args["override_settings_texts"] = override
 
         # Apply VAE override
         if vae is not None:
-            override: List[str] = named_args.get("override_settings_texts", [])
-            override = [x for x in override if not x.startswith("VAE: ")]
-            override.append("VAE: " + vae)
-            named_args["override_settings_texts"] = override
+            if is_forge:
+                shared.opts.sd_vae = vae
+            else:
+                override: List[str] = named_args.get("override_settings_texts", [])
+                override = [x for x in override if not x.startswith("VAE: ")]
+                override.append("VAE: " + vae)
+                named_args["override_settings_texts"] = override
 
         # A1111 1.5.0-RC has new request field
         if "request" in named_args:
@@ -205,20 +212,28 @@ class TaskRunner:
         checkpoint: str = None,
         vae: str = None,
     ):
+        is_forge = hasattr(sd_models, "reload_model_weights")
+
         # Apply checkpoint override
         if checkpoint is not None:
-            override: Dict = named_args.get("override_settings", {})
-            if checkpoint != "System":
-                override["sd_model_checkpoint"] = checkpoint
+            if is_forge:
+                sd_models.reload_model_weights(sd_model=None, info=checkpoint)
             else:
-                override.pop("sd_model_checkpoint", None)
-            named_args["override_settings"] = override
+                override: Dict = named_args.get("override_settings", {})
+                if checkpoint != "System":
+                    override["sd_model_checkpoint"] = checkpoint
+                else:
+                    override.pop("sd_model_checkpoint", None)
+                named_args["override_settings"] = override
 
         # Apply VAE override
         if vae is not None:
-            override: Dict = named_args.get("override_settings", {})
-            override["sd_vae"] = vae
-            named_args["override_settings"] = override
+            if is_forge:
+                shared.opts.sd_vae = vae
+            else:
+                override: Dict = named_args.get("override_settings", {})
+                override["sd_vae"] = vae
+                named_args["override_settings"] = override
 
         # load images from disk
         if is_img2img:
@@ -282,12 +297,16 @@ class TaskRunner:
         )
 
         task_type = "img2img" if is_img2img else "txt2img"
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
         task = Task(
             id=task_id,
             name=task_name,
             type=task_type,
             params=params,
             script_params=script_args,
+            position=now,
+            result="",
+            bookmarked=False,
         )
         task_manager.add_task(task)
 
@@ -310,12 +329,16 @@ class TaskRunner:
         (params, script_params) = self.__serialize_api_task_args(is_img2img, checkpoint=checkpoint, vae=vae, **args)
 
         task_type = "img2img" if is_img2img else "txt2img"
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
         task = Task(
             id=task_id,
             api_task_id=api_task_id,
             type=task_type,
             params=params,
             script_params=script_params,
+            position=now,
+            result="",
+            bookmarked=False,
         )
         task_manager.add_task(task)
 

@@ -108,7 +108,10 @@ def regsiter_apis(app: App, task_runner: TaskRunner):
 
     @app.get("/agent-scheduler/v1/sd-models", response_model=List[str])
     def get_sd_models():
-        return [x.title for x in sd_models.checkpoints_list.values()]
+        if hasattr(sd_models, "checkpoint_tiles"):
+            return sd_models.checkpoint_tiles()
+        else:
+            return [x.title for x in sd_models.checkpoints_list.values()]
 
     @app.post("/agent-scheduler/v1/queue/txt2img", response_model=QueueTaskResponse, dependencies=deps)
     def queue_txt2img(body: Txt2ImgApiTaskArgs):

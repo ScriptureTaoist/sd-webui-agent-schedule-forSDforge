@@ -55,8 +55,9 @@ class Task(TaskModel):
         priority = kwargs.pop("priority", int(datetime.now(timezone.utc).timestamp() * 1000))
         super().__init__(priority=priority, **kwargs)
 
-    class Config(TaskModel.__config__):
-        exclude = ["script_params"]
+    model_config = {
+        "exclude": ["script_params"]
+    }
 
     @staticmethod
     def from_table(table: "TaskTable"):
