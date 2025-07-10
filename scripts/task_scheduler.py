@@ -22,12 +22,18 @@ from modules.generation_parameters_copypaste import (
 )
 
 from agent_scheduler.task_runner import TaskRunner, get_instance
-from agent_scheduler.helpers import log, compare_components_with_ids, get_components_by_ids, is_macos
+from agent_scheduler.helpers import log, compare_components_with_ids, get_components_by_ids, is_macos, i18n
 from agent_scheduler.db import init as init_db, task_manager, TaskStatus
 from agent_scheduler.api import regsiter_apis
 
 is_sdnext = parser.description == "SD.Next"
-ToolButton = gr.Button if is_sdnext else ui_components.ToolButton
+try:
+    import ldm_patched.modules.model_management
+    is_forge = True
+except ImportError:
+    is_forge = False
+
+ToolButton = gr.Button if is_sdnext or is_forge else ui_components.ToolButton
 
 task_runner: TaskRunner = None
 
@@ -75,12 +81,13 @@ class Script(scripts.Script):
         script_callbacks.on_app_started(lambda block, _: self.on_app_started(block))
         self.checkpoint_override = checkpoint_current
         self.generate_button = None
+        self.gallery = None
         self.enqueue_row = None
         self.checkpoint_dropdown = None
         self.submit_button = None
 
     def title(self):
-        return "Agent Scheduler"
+        return i18n("Agent Scheduler")
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
@@ -90,10 +97,14 @@ class Script(scripts.Script):
 
     def after_component(self, component, **_kwargs):
         generate_id = "txt2img_generate" if self.is_txt2img else "img2img_generate"
+        gallery_id = "txt2img_gallery" if self.is_txt2img else "img2img_gallery"
         generate_box = "txt2img_generate_box" if self.is_txt2img else "img2img_generate_box"
         actions_column_id = "txt2img_actions_column" if self.is_txt2img else "img2img_actions_column"
         neg_id = "txt2img_neg_prompt" if self.is_txt2img else "img2img_neg_prompt"
         toprow_id = "txt2img_toprow" if self.is_txt2img else "img2img_toprow"
+
+        if component.elem_id == gallery_id:
+            self.gallery = component
 
         def add_enqueue_row(elem_id):
             parent = component.parent
@@ -140,66 +151,88 @@ class Script(scripts.Script):
                     lambda: {"choices": get_checkpoint_choices()},
                     f"refresh_{id_part}_checkpoint",
                 )
-            self.submit_button = gr.Button("Enqueue", elem_id=f"{id_part}_enqueue", variant="primary")
+            self.submit_button = gr.Button(i18n("Enqueue"), elem_id=f"{id_part}_enqueue", variant="primary")
 
-    def bind_enqueue_button(self, root: gr.Blocks):
-        generate = self.generate_button
+    def bind_enqueue_button(self, root):
         is_img2img = self.is_img2img
-        dependencies: List[dict] = [
-            x for x in root.dependencies if x["trigger"] == "click" and generate._id in x["targets"]
-        ]
 
-        dependency: dict = None
-        cnet_dependency: dict = None
-        UiControlNetUnit = None
-        for d in dependencies:
-            if len(d["outputs"]) == 1:
-                outputs = get_components_by_ids(root, d["outputs"])
-                output = outputs[0]
-                if isinstance(output, gr.State) and type(output.value).__name__ == "UiControlNetUnit":
-                    cnet_dependency = d
-                    UiControlNetUnit = type(output.value)
+        if self.gallery is None:
+            log.error("[AgentScheduler] Could not find the main gallery component. The 'Enqueue' button will not work.")
+            return
 
-            elif len(d["outputs"]) == 4:
+        # Find the main dependency for the generate button
+        dependency = None
+        api_name = "img2img" if self.is_img2img else "txt2img"
+        
+        for d in root.config['dependencies']:
+            if d.get('api_name') == api_name:
                 dependency = d
+                break
+        
+        if dependency is None:
+            # Fallback to old method if api_name is not found
+            log.warning(f"[AgentScheduler] Could not find api_name:{api_name}, fallback to old method.")
+            # Find dependencies that are triggered by the generate button and output to the gallery
+            click_deps = [
+                d for d in root.config['dependencies']
+                if d.get('trigger') == 'click' and self.generate_button._id in d.get('targets', [])
+            ]
+            
+            gallery_deps = [d for d in click_deps if self.gallery._id in d.get('outputs', [])]
+
+            if len(gallery_deps) == 1:
+                dependency = gallery_deps[0]
+            elif gallery_deps:
+                # If multiple, pick the one with the most inputs
+                dependency = max(gallery_deps, key=lambda d: len(d.get('inputs', [])))
+            elif click_deps:
+                # Fallback if no dependency outputs to the gallery (e.g. API only)
+                # Pick the one with the most inputs from all click dependencies
+                dependency = max(click_deps, key=lambda d: len(d.get('inputs', [])))
+
+        if dependency is None:
+            log.error("[AgentScheduler] Could not find the main generation dependency. The 'Enqueue' button will not work.")
+            return
 
         with root:
             if self.checkpoint_dropdown is not None:
                 self.checkpoint_dropdown.change(fn=self.on_checkpoint_changed, inputs=[self.checkpoint_dropdown])
 
-            fn_block = next(fn for fn in root.fns if compare_components_with_ids(fn.inputs, dependency["inputs"]))
             fn = self.wrap_register_ui_task()
-            inputs = fn_block.inputs.copy()
-            inputs.insert(0, self.checkpoint_dropdown)
+
+            # Resolve component IDs to component objects
+            raw_inputs = dependency.get("inputs", [])
+            log.debug(f"[AgentScheduler] Found dependency with raw_inputs: {raw_inputs}")
+
+            input_components = get_components_by_ids(root, raw_inputs)
+            # Filter out any non-component objects
+            input_components = [c for c in input_components if isinstance(c, gr.Component)]
+
+            log.debug(f"[AgentScheduler] Resolved {len(input_components)} components out of {len(raw_inputs)} raw inputs.")
+            
+            # Prepend the checkpoint dropdown if it exists
+            if self.checkpoint_dropdown:
+                input_components.insert(0, self.checkpoint_dropdown)
+
             args = dict(
                 fn=fn,
                 _js="submit_enqueue_img2img" if is_img2img else "submit_enqueue",
-                inputs=inputs,
+                inputs=input_components,
                 outputs=None,
                 show_progress=False,
             )
 
             self.submit_button.click(**args)
 
-            if cnet_dependency is not None:
-                cnet_fn_block = next(
-                    fn for fn in root.fns if compare_components_with_ids(fn.inputs, cnet_dependency["inputs"])
-                )
-                self.submit_button.click(
-                    fn=UiControlNetUnit,
-                    inputs=cnet_fn_block.inputs,
-                    outputs=cnet_fn_block.outputs,
-                    queue=False,
-                )
-
     def wrap_register_ui_task(self):
         def f(request: gr.Request, *args):
-            if len(args) == 0:
+            if len(args) < 2:
                 raise Exception("Invalid call")
 
-            checkpoint: str = args[0]
-            task_id = args[1]
-            args = args[1:]
+            task_id = args[0]
+            checkpoint: str = args[1]
+            args = args[2:]
+            log.info(f"[{self.title()}] Registering task '{task_id}' with checkpoint '{checkpoint}'")
             task_name = None
 
             if task_id == queue_with_every_checkpoints:
@@ -220,6 +253,7 @@ class Script(scripts.Script):
                 else:
                     checkpoint = [checkpoint]
 
+            log.info(f"[{self.title()}] Queuing {len(checkpoint)} tasks.")
             for i, c in enumerate(checkpoint):
                 t_id = task_id if i == 0 else f"{task_id}.{i}"
                 task_runner.register_ui_task(
@@ -259,24 +293,24 @@ def get_checkpoint_choices():
 def create_send_to_buttons():
     return {
         "txt2img": ToolButton(
-            "➠ text" if is_sdnext else "📝",
+            "➠ text" if is_sdnext or is_forge else "📝",
             elem_id="agent_scheduler_send_to_txt2img",
-            tooltip="Send generation parameters to txt2img tab.",
+            tooltip=i18n("Send generation parameters to txt2img tab."),
         ),
         "img2img": ToolButton(
-            "➠ image" if is_sdnext else "🖼️",
+            "➠ image" if is_sdnext or is_forge else "🖼️",
             elem_id="agent_scheduler_send_to_img2img",
-            tooltip="Send image and generation parameters to img2img tab.",
+            tooltip=i18n("Send image and generation parameters to img2img tab."),
         ),
         "inpaint": ToolButton(
-            "➠ inpaint" if is_sdnext else "🎨️",
+            "➠ inpaint" if is_sdnext or is_forge else "🎨️",
             elem_id="agent_scheduler_send_to_inpaint",
-            tooltip="Send image and generation parameters to img2img inpaint tab.",
+            tooltip=i18n("Send image and generation parameters to img2img inpaint tab."),
         ),
         "extras": ToolButton(
-            "➠ process" if is_sdnext else "📐",
+            "➠ process" if is_sdnext or is_forge else "📐",
             elem_id="agent_scheduler_send_to_extras",
-            tooltip="Send image and generation parameters to extras tab.",
+            tooltip=i18n("Send image and generation parameters to extras tab."),
         ),
     }
 
@@ -321,9 +355,9 @@ def get_task_results(task_id: str, image_idx: int = None):
     if task is None:
         pass
     elif task.status != TaskStatus.DONE:
-        infotext = f"Status: {task.status}"
+        infotext = f'{i18n("Status: ")}{task.status}'
         if task.status == TaskStatus.FAILED and task.result:
-            infotext += f"\nError: {task.result}"
+            infotext += f'\n{i18n("Error: ")}{task.result}'
     elif task.status == TaskStatus.DONE:
         try:
             result: dict = json.loads(task.result)
@@ -342,7 +376,7 @@ def get_task_results(task_id: str, image_idx: int = None):
         except Exception as e:
             log.error(f"[AgentScheduler] Failed to load task result")
             log.error(e)
-            infotext = f"Failed to load task result: {str(e)}"
+            infotext = f'{i18n("Failed to load task result: ")}{str(e)}'
 
     res = (
         gr.Textbox.update(infotext, visible=infotext is not None),
@@ -382,41 +416,41 @@ def on_ui_tab(**_kwargs):
 
     with gr.Blocks(analytics_enabled=False) as scheduler_tab:
         with gr.Tabs(elem_id="agent_scheduler_tabs"):
-            with gr.Tab("Task Queue", id=0, elem_id="agent_scheduler_pending_tasks_tab"):
+            with gr.Tab(i18n("Task Queue"), id=0, elem_id="agent_scheduler_pending_tasks_tab"):
                 with gr.Row(elem_id="agent_scheduler_pending_tasks_wrapper"):
                     with gr.Column(scale=1):
                         with gr.Row(elem_id="agent_scheduler_pending_tasks_actions", elem_classes="flex-row"):
                             paused = getattr(shared.opts, "queue_paused", False)
 
                             gr.Button(
-                                "Pause",
+                                i18n("Pause"),
                                 elem_id="agent_scheduler_action_pause",
                                 variant="stop",
                                 visible=not paused,
                             )
                             gr.Button(
-                                "Resume",
+                                i18n("Resume"),
                                 elem_id="agent_scheduler_action_resume",
                                 variant="primary",
                                 visible=paused,
                             )
                             gr.Button(
-                                "Refresh",
+                                i18n("Refresh"),
                                 elem_id="agent_scheduler_action_reload",
                                 variant="secondary",
                             )
                             gr.Button(
-                                "Clear",
+                                i18n("Clear"),
                                 elem_id="agent_scheduler_action_clear_queue",
                                 variant="stop",
                             )
                             gr.Button(
-                                "Export",
+                                i18n("Export"),
                                 elem_id="agent_scheduler_action_export",
                                 variant="secondary",
                             )
                             gr.Button(
-                                "Import",
+                                i18n("Import"),
                                 elem_id="agent_scheduler_action_import",
                                 variant="secondary",
                             )
@@ -425,8 +459,8 @@ def on_ui_tab(**_kwargs):
                             with gr.Row(elem_classes=["agent_scheduler_filter_container", "flex-row", "ml-auto"]):
                                 gr.Textbox(
                                     max_lines=1,
-                                    placeholder="Search",
-                                    label="Search",
+                                    placeholder=i18n("Search"),
+                                    label=i18n("Search"),
                                     show_label=False,
                                     min_width=0,
                                     elem_id="agent_scheduler_action_search",
@@ -437,28 +471,28 @@ def on_ui_tab(**_kwargs):
                     with gr.Column(scale=1):
                         gr.Gallery(
                             elem_id="agent_scheduler_current_task_images",
-                            label="Output",
+                            label=i18n("Output"),
                             show_label=False,
                             columns=2,
                             object_fit="contain",
                         )
-            with gr.Tab("Task History", id=1, elem_id="agent_scheduler_history_tab"):
+            with gr.Tab(i18n("Task History"), id=1, elem_id="agent_scheduler_history_tab"):
                 with gr.Row(elem_id="agent_scheduler_history_wrapper"):
                     with gr.Column(scale=1):
                         with gr.Row(elem_id="agent_scheduler_history_actions", elem_classes="flex-row"):
                             gr.Button(
-                                "Requeue Failed",
+                                i18n("Requeue Failed"),
                                 elem_id="agent_scheduler_action_requeue",
                                 variant="primary",
                             )
                             gr.Button(
-                                "Refresh",
+                                i18n("Refresh"),
                                 elem_id="agent_scheduler_action_refresh_history",
                                 elem_classes="agent_scheduler_action_refresh",
                                 variant="secondary",
                             )
                             gr.Button(
-                                "Clear",
+                                i18n("Clear"),
                                 elem_id="agent_scheduler_action_clear_history",
                                 variant="stop",
                             )
@@ -466,15 +500,15 @@ def on_ui_tab(**_kwargs):
                             with gr.Row(elem_classes=["agent_scheduler_filter_container", "flex-row", "ml-auto"]):
                                 status = gr.Dropdown(
                                     elem_id="agent_scheduler_status_filter",
-                                    choices=task_filter_choices,
-                                    value="All",
+                                    choices=[i18n(c) for c in task_filter_choices],
+                                    value=i18n("All"),
                                     show_label=False,
                                     min_width=0,
                                 )
                                 gr.Textbox(
                                     max_lines=1,
-                                    placeholder="Search",
-                                    label="Search",
+                                    placeholder=i18n("Search"),
+                                    label=i18n("Search"),
                                     show_label=False,
                                     min_width=0,
                                     elem_id="agent_scheduler_action_search_history",
@@ -485,7 +519,7 @@ def on_ui_tab(**_kwargs):
                     with gr.Column(scale=1, elem_id="agent_scheduler_history_results"):
                         galerry = gr.Gallery(
                             elem_id="agent_scheduler_history_gallery",
-                            label="Output",
+                            label=i18n("Output"),
                             show_label=False,
                             columns=2,
                             preview=True,
@@ -495,30 +529,30 @@ def on_ui_tab(**_kwargs):
                             elem_id="agent_scheduler_history_result_actions",
                             visible=False,
                         ) as result_actions:
-                            if is_sdnext:
+                            if is_sdnext or is_forge:
                                 with gr.Group():
                                     save = ToolButton(
                                         "💾",
                                         elem_id="agent_scheduler_save",
-                                        tooltip=f"Save the image to a dedicated directory ({shared.opts.outdir_save}).",
+                                        tooltip=i18n(f"Save the image to a dedicated directory ({shared.opts.outdir_save})."),
                                     )
                                     save_zip = None
                             else:
                                 save = ToolButton(
                                     "💾",
                                     elem_id="agent_scheduler_save",
-                                    tooltip=f"Save the image to a dedicated directory ({shared.opts.outdir_save}).",
+                                    tooltip=i18n(f"Save the image to a dedicated directory ({shared.opts.outdir_save})."),
                                 )
                                 save_zip = ToolButton(
                                     "🗃️",
                                     elem_id="agent_scheduler_save_zip",
-                                    tooltip=f"Save zip archive with images to a dedicated directory ({shared.opts.outdir_save})",
+                                    tooltip=i18n(f"Save zip archive with images to a dedicated directory ({shared.opts.outdir_save})"),
                                 )
                             send_to_buttons = create_send_to_buttons()
                         with gr.Group():
                             generation_info = gr.Textbox(visible=False, elem_id=f"agent_scheduler_generation_info")
                             infotext = gr.TextArea(
-                                label="Generation Info",
+                                label=i18n("Generation Info"),
                                 elem_id=f"agent_scheduler_history_infotext",
                                 interactive=False,
                                 visible=True,
@@ -591,12 +625,24 @@ def on_ui_tab(**_kwargs):
 
 
 def on_ui_settings():
-    section = ("agent_scheduler", "Agent Scheduler")
+    section = ("agent_scheduler", i18n("Agent Scheduler"))
+    shared.opts.add_option(
+        "agent_scheduler_language",
+        shared.OptionInfo(
+            "English",
+            "Language",
+            gr.Radio,
+            lambda: {
+                "choices": ["English", "中文"],
+            },
+            section=section,
+        ),
+    )
     shared.opts.add_option(
         "queue_paused",
         shared.OptionInfo(
             False,
-            "Disable queue auto-processing",
+            i18n("Disable queue auto-processing"),
             gr.Checkbox,
             {"interactive": True},
             section=section,
@@ -606,7 +652,7 @@ def on_ui_settings():
         "queue_button_hide_checkpoint",
         shared.OptionInfo(
             True,
-            "Hide the custom checkpoint dropdown",
+            i18n("Hide the custom checkpoint dropdown"),
             gr.Checkbox,
             {},
             section=section,
@@ -616,12 +662,12 @@ def on_ui_settings():
         "queue_button_placement",
         shared.OptionInfo(
             placement_under_generate,
-            "Queue button placement",
+            i18n("Queue button placement"),
             gr.Radio,
             lambda: {
                 "choices": [
-                    placement_under_generate,
-                    placement_between_prompt_and_generate,
+                    i18n(placement_under_generate),
+                    i18n(placement_between_prompt_and_generate),
                 ]
             },
             section=section,
@@ -631,12 +677,12 @@ def on_ui_settings():
         "queue_ui_placement",
         shared.OptionInfo(
             ui_placement_as_tab,
-            "Task queue UI placement",
+            i18n("Task queue UI placement"),
             gr.Radio,
             lambda: {
                 "choices": [
-                    ui_placement_as_tab,
-                    ui_placement_append_to_main,
+                    i18n(ui_placement_as_tab),
+                    i18n(ui_placement_append_to_main),
                 ]
             },
             section=section,
@@ -646,10 +692,10 @@ def on_ui_settings():
         "queue_history_retention_days",
         shared.OptionInfo(
             "30 days",
-            "Auto delete queue history (bookmarked tasks excluded)",
+            i18n("Auto delete queue history (bookmarked tasks excluded)"),
             gr.Radio,
             lambda: {
-                "choices": list(task_history_retenion_map.keys()),
+                "choices": [i18n(c) for c in task_history_retenion_map.keys()],
             },
             section=section,
         ),
@@ -658,7 +704,7 @@ def on_ui_settings():
         "queue_automatic_requeue_failed_task",
         shared.OptionInfo(
             False,
-            "Auto requeue failed tasks",
+            i18n("Auto requeue failed tasks"),
             gr.Checkbox,
             {},
             section=section,
@@ -668,7 +714,7 @@ def on_ui_settings():
         "queue_grid_page_size",
         shared.OptionInfo(
             0,
-            "Task list page size (0 for auto)",
+            i18n("Task list page size (0 for auto)"),
             gr.Slider,
             {"minimum": 0, "maximum": 200, "step": 1},
             section=section,
@@ -699,7 +745,7 @@ def on_ui_settings():
             modifiers = gr.CheckboxGroup(
                 enqueue_key_modifiers,
                 value=modifiers,
-                label="Enqueue keyboard shortcut",
+                label=i18n("Enqueue keyboard shortcut"),
                 elem_id="enqueue_keyboard_shortcut_modifiers",
                 interactive=not disabled,
             )
@@ -707,14 +753,14 @@ def on_ui_settings():
                 choices=list(enqueue_key_codes.keys()),
                 value="E" if len(key_code_value) == 0 else key_code_value[0],
                 elem_id="enqueue_keyboard_shortcut_key",
-                label="Key",
+                label=i18n("Key"),
                 interactive=not disabled,
             )
             shortcut = gr.Textbox(**_kwargs)
             disable = gr.Checkbox(
                 value=disabled,
                 elem_id="enqueue_keyboard_shortcut_disable",
-                label="Disable keyboard shortcut",
+                label=i18n("Disable keyboard shortcut"),
             )
 
         modifiers.change(
@@ -739,7 +785,7 @@ def on_ui_settings():
         "queue_keyboard_shortcut",
         shared.OptionInfo(
             enqueue_default_hotkey,
-            "Enqueue keyboard shortcut",
+            i18n("Enqueue keyboard shortcut"),
             enqueue_keyboard_shortcut_ui,
             {
                 "interactive": False,
@@ -751,17 +797,17 @@ def on_ui_settings():
         "queue_completion_action",
         shared.OptionInfo(
             "Do nothing",
-            "Action after queue completion",
+            i18n("Action after queue completion"),
             gr.Radio,
             lambda: {
-                "choices": completion_action_choices,
+                "choices": [i18n(c) for c in completion_action_choices],
             },
             section=section,
         ),
     )
 
 
-def on_app_started(block: gr.Blocks, app):
+def on_app_started(block, app):
     global task_runner
     task_runner = get_instance(block)
     task_runner.execute_pending_tasks_threading()

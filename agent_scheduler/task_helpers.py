@@ -239,28 +239,38 @@ def map_controlnet_args_to_api_task_args(args: Dict):
 
 
 def map_ui_task_args_list_to_named_args(args: List, is_img2img: bool):
+    log.info(f"[AgentScheduler] map_ui_task_args_list_to_named_args called with is_img2img={is_img2img}")
+    log.debug(f"[AgentScheduler] raw args: {args}")
     fn = (
         getattr(img2img, "img2img_create_processing", img2img.img2img)
         if is_img2img
         else getattr(txt2img, "txt2img_create_processing", txt2img.txt2img)
     )
     arg_names = inspect.getfullargspec(fn).args
+    log.debug(f"[AgentScheduler] arg_names: {arg_names}")
 
     # SD WebUI 1.5.0 has new request arg
     if "request" in arg_names:
         args.insert(arg_names.index("request"), None)
 
     named_args = dict(zip(arg_names, args[0 : len(arg_names)]))
+    log.debug(f"[AgentScheduler] named_args: {named_args}")
     script_args = args[len(arg_names) :]
 
     override_settings_texts: List[str] = named_args.get("override_settings_texts", [])
+    log.debug(f"[AgentScheduler] override_settings_texts before processing: {override_settings_texts}")
     # add clip_skip if not exist in args (vlad fork has this arg)
     if named_args.get("clip_skip", None) is None:
+        if not isinstance(override_settings_texts, list):
+            log.warning(f"[AgentScheduler] override_settings_texts is not a list, but {type(override_settings_texts)}. Overwriting with empty list.")
+            override_settings_texts = []
+        
         clip_skip = next((s for s in override_settings_texts if s.startswith("Clip skip:")), None)
         if clip_skip is None and hasattr(shared.opts, "CLIP_stop_at_last_layers"):
             override_settings_texts.append(f"Clip skip: {shared.opts.CLIP_stop_at_last_layers}")
 
     named_args["override_settings_texts"] = override_settings_texts
+    log.debug(f"[AgentScheduler] override_settings_texts after processing: {override_settings_texts}")
 
     sampler_index = named_args.get("sampler_index", None)
     if sampler_index is not None:
